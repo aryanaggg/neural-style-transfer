@@ -1,5 +1,6 @@
-from tensorflow.keras.layers import *
-from tensorflow.keras.models import Model
+# pyright: reportUndefinedVariable=false
+from tensorflow.keras.layers import * # type: ignore
+from tensorflow.keras.models import Model # type: ignore
 import tensorflow as tf
 import matplotlib.pyplot as plt
 
@@ -165,7 +166,7 @@ style_train = kth_style_images[style_indices]
 """Training"""
 style_transfer_model.fit(
     # [x_train, style_train],   # the content and style are different now
-    [x_train, x_train]
+    [x_train, x_train],
     x_train,
     epochs=3,
     batch_size=16
@@ -206,4 +207,11 @@ plt.tight_layout()
 plt.savefig("style_transfer_result_12.png")
 plt.show()
 
-style_transfer_model.save("style_transfer_adain_3_layers_no_input_dim_wd_updated_now_training_wd_styles_mse_12.keras")
+
+from datetime import datetime
+
+name = datetime.now().strftime("model_%Y%m%d_%H%M.keras")
+style_transfer_model.save(f"models/{name}")
+
+
+# style_transfer_model.save("style_transfer_adain_3_layers_no_input_dim_wd_updated_now_training_wd_styles_mse_12.keras")
