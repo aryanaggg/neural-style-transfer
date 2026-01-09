@@ -35,7 +35,7 @@ def load_kth_tips2_textures(root_dir, img_size=28, max_images=1000):
                     continue
 
                 img = cv2.resize(img, (img_size, img_size))
-                img = img / 255.0
+                img = img.astype(np.float32) / 255.0
                 images.append(img)
 
                 if len(images) >= max_images:
@@ -51,9 +51,27 @@ def load_kth_tips2_textures(root_dir, img_size=28, max_images=1000):
     print(f"Loaded {len(images)} texture images")
     return images
 
+"""Loading Datasets"""
 dataset = tf.keras.datasets.mnist
+
 (x_train, _), (x_test, _) = dataset.load_data()
-x_train, x_test = x_train/255.0, x_test/255.0
+
+# upscaling content dataset
+TARGET_SIZE = 112
+
+x_train = x_train.astype(np.float32) / 255.0
+x_test  = x_test.astype(np.float32) / 255.0
+
+x_train = np.stack([
+    cv2.resize(img, (TARGET_SIZE, TARGET_SIZE), interpolation=cv2.INTER_CUBIC)
+    for img in x_train
+], axis=0)
+
+x_test = np.stack([
+    cv2.resize(img, (TARGET_SIZE, TARGET_SIZE), interpolation=cv2.INTER_CUBIC)
+    for img in x_test
+], axis=0)
+
 x_train = np.repeat(x_train[..., None], 3, axis=-1)
 x_test  = np.repeat(x_test[..., None], 3, axis=-1)
 
@@ -65,10 +83,11 @@ fashion_test  = fashion_test / 255.0
 
 kth_style_images = load_kth_tips2_textures(
     root_dir="KTH-TIPS2",
-    img_size=28,
+    img_size=TARGET_SIZE,
     max_images=1000
 )
 
+"""Auto-Encoder Definition"""
 def encoder_block(inputs):
     x = Conv2D(32, (3,3), padding='same')(inputs)
     x = BatchNormalization()(x)
@@ -99,7 +118,6 @@ style_input = Input(shape=(None,None,3), name="style_image")
 content_features = encoder(content_input)
 style_features   = encoder(style_input)
 
-
 class AdaIN(tf.keras.layers.Layer):
     def __init__(self, epsilon=1e-5, **kwargs):
         super().__init__(**kwargs)
@@ -123,7 +141,6 @@ class AdaIN(tf.keras.layers.Layer):
             "epsilon": self.epsilon
         })
         return config
-
 
 t = AdaIN()([content_features, style_features])
 
@@ -196,7 +213,6 @@ def style_loss(style, generated, encoder, eps=1e-5):
 
     return mean_loss + var_loss
 
-
 # train_step definition
 optimizer = tf.keras.optimizers.Adam(1e-3)
 
@@ -225,23 +241,51 @@ def train_step(content, style):
 """Dataset & Training"""
 
 # shuffling training dataset, so it doesnt have sequential corelations
-for epoch in range(3):
-    print(f"\nEpoch {epoch+1}")
+EPOCHS = 3
+BATCH_SIZE = 8
+SHUFFLE_BUFFER = 1000
 
-    style_indices = np.random.randint(
-        0, len(kth_style_images), size=len(x_train)
+steps_per_epoch = len(x_train) // BATCH_SIZE
+loss_tracker = tf.keras.metrics.Mean(name="loss")
+
+STYLE_POOL = tf.convert_to_tensor(kth_style_images)
+
+for epoch in range(EPOCHS):
+    print(f"\nEpoch {epoch + 1}/{EPOCHS}")
+    loss_tracker.reset_state()
+
+    # style_indices = np.random.randint(
+    #     0, len(kth_style_images), size=len(x_train)
+    # )
+    # style_train = kth_style_images[style_indices]
+
+    dataset = (
+        tf.data.Dataset
+        .from_tensor_slices(x_train)
+        .shuffle(SHUFFLE_BUFFER)
+        .batch(BATCH_SIZE)
     )
-    style_train = kth_style_images[style_indices]
 
-    dataset = tf.data.Dataset.from_tensor_slices(
-        (x_train, style_train)
-    ).shuffle(1000).batch(16)
+    for step, c in enumerate(dataset.take(steps_per_epoch)):
+        # sampling style batch(cause it was too huge to load into memory earlier ~ 8.4gb)
+        idx = tf.random.uniform(
+            shape=(tf.shape(c)[0],),
+            minval=0,
+            maxval=tf.shape(STYLE_POOL)[0],
+            dtype=tf.int32
+        )
+        s = tf.gather(STYLE_POOL, idx)
 
-    for step, (c, s) in enumerate(dataset):
         loss = train_step(c, s)
-        if step % 100 == 0:
-            print(f"step {step} | loss {loss.numpy():.4f}")
+        loss_tracker.update_state(loss)
 
+        if step % 100 == 0:
+            print(
+                f"{step}/{steps_per_epoch} "
+                f"- loss: {loss_tracker.result().numpy():.4f}"
+            )
+
+    print(f"Epoch {epoch + 1} loss: {loss_tracker.result().numpy():.6f}")
 
 # old
 # style_transfer_model.fit(
@@ -288,11 +332,9 @@ plt.tight_layout()
 plt.savefig("style_transfer_result_12.png")
 plt.show()
 
-
 from datetime import datetime
 
 name = datetime.now().strftime("model_%Y%m%d_%H%M.keras")
 style_transfer_model.save(f"models/{name}")
-
 
 # style_transfer_model.save("style_transfer_adain_3_layers_no_input_dim_wd_updated_now_training_wd_styles_mse_12.keras")
