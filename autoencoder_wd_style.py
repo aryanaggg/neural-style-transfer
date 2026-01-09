@@ -7,7 +7,9 @@ import matplotlib.pyplot as plt
 import os
 import cv2
 import numpy as np
+from datetime import datetime
 
+# loading syle_dataset
 def load_kth_tips2_textures(root_dir, img_size=28, max_images=1000):
     images = []
 
@@ -55,29 +57,17 @@ x_train, x_test = x_train/255.0, x_test/255.0
 x_train = np.repeat(x_train[..., None], 3, axis=-1)
 x_test  = np.repeat(x_test[..., None], 3, axis=-1)
 
-
-# adding channel dimensions
-# x_train = x_train[..., None]
-# x_test  = x_test[..., None]
-
 # Load Fashion-MNIST for style
 (fashion_train, _), (fashion_test, _) = tf.keras.datasets.fashion_mnist.load_data()
 
 fashion_train = fashion_train / 255.0
 fashion_test  = fashion_test / 255.0
 
-# add channel dimension
-# fashion_train = fashion_train[..., None]
-# fashion_test  = fashion_test[..., None]
-
 kth_style_images = load_kth_tips2_textures(
     root_dir="KTH-TIPS2",
     img_size=28,
     max_images=1000
 )
-
-content_input = Input(shape=(None,None,3), name="content_image")
-style_input = Input(shape=(None,None,3), name="style_image")
 
 def encoder_block(inputs):
     x = Conv2D(32, (3,3), padding='same')(inputs)
@@ -97,8 +87,18 @@ def encoder_block(inputs):
 
     return x  # shape: (7,7,64) now (3,3,128)
 
-content_features = encoder_block(content_input)
-style_features   = encoder_block(style_input)
+encoder_input = Input(shape=(None, None, 3))
+encoder_output = encoder_block(encoder_input)
+
+encoder = Model(encoder_input, encoder_output, name="shared_encoder")
+encoder.trainable = False
+
+content_input = Input(shape=(None,None,3), name="content_image")
+style_input = Input(shape=(None,None,3), name="style_image")
+
+content_features = encoder(content_input)
+style_features   = encoder(style_input)
+
 
 class AdaIN(tf.keras.layers.Layer):
     def __init__(self, epsilon=1e-5, **kwargs):
@@ -151,28 +151,109 @@ style_transfer_model = Model(
     name="Simple_Style_Transfer_Model"
 )
 
-style_transfer_model.compile(
-    optimizer=tf.keras.optimizers.Adam(1e-3),
-    loss="mse"
-)
+# style_transfer_model.compile(
+#     optimizer=tf.keras.optimizers.Adam(1e-3),
+#     loss="mse"
+# )
 
 style_transfer_model.summary()
 
-style_indices = np.random.randint(
-    0, len(kth_style_images), size=len(x_train)
-)
-style_train = kth_style_images[style_indices]
+"""Loss Definitions"""
 
-"""Training"""
-style_transfer_model.fit(
-    # [x_train, style_train],   # the content and style are different now
-    [x_train, x_train],
-    x_train,
-    epochs=3,
-    batch_size=16
-)
+# generated image - content image
+def content_loss(content, generated, encoder):
+    c_feat = encoder(content, training=False)
+    g_feat = encoder(generated, training=False)
+    return tf.reduce_mean(tf.square(c_feat - g_feat))
+
+def gram_matrix(x):
+    # x: (B, H, W, C)
+    b, h, w, c = x.shape
+    x = tf.reshape(x, [b, h*w, c])
+    gram = tf.matmul(x, x, transpose_a=True)
+    return gram / tf.cast(h * w * c, tf.float32)
+
+# using gram-matrices (apperently doesnt align very well with adain)
+# def style_loss(style, generated, encoder):
+#     s_feat = encoder(style, training=False)
+#     g_feat = encoder(generated, training=False)
+
+#     S = gram_matrix(s_feat)
+#     G = gram_matrix(g_feat)
+
+#     return tf.reduce_mean(tf.square(S - G))
+
+# using mean_variance
+def style_loss(style, generated, encoder, eps=1e-5):
+    s_feat = encoder(style, training=False)
+    g_feat = encoder(generated, training=False)
+
+    s_mean, s_var = tf.nn.moments(s_feat, axes=[1, 2])
+    g_mean, g_var = tf.nn.moments(g_feat, axes=[1, 2])
+
+    mean_loss = tf.reduce_mean(tf.square(s_mean - g_mean))
+    var_loss  = tf.reduce_mean(tf.square(s_var - g_var))
+
+    return mean_loss + var_loss
+
+
+# train_step definition
+optimizer = tf.keras.optimizers.Adam(1e-3)
+
+@tf.function
+def train_step(content, style):
+    with tf.GradientTape() as tape:
+        generated = style_transfer_model(
+            [content, style], training=True
+        )
+
+        c_loss = content_loss(content, generated, encoder)
+        s_loss = style_loss(style, generated, encoder)
+
+        total_loss = c_loss + 2.0 * s_loss
+
+    grads = tape.gradient(
+        total_loss,
+        style_transfer_model.trainable_variables
+    )
+    optimizer.apply_gradients(
+        zip(grads, style_transfer_model.trainable_variables)
+    )
+
+    return total_loss
+
+"""Dataset & Training"""
+
+# shuffling training dataset, so it doesnt have sequential corelations
+for epoch in range(3):
+    print(f"\nEpoch {epoch+1}")
+
+    style_indices = np.random.randint(
+        0, len(kth_style_images), size=len(x_train)
+    )
+    style_train = kth_style_images[style_indices]
+
+    dataset = tf.data.Dataset.from_tensor_slices(
+        (x_train, style_train)
+    ).shuffle(1000).batch(16)
+
+    for step, (c, s) in enumerate(dataset):
+        loss = train_step(c, s)
+        if step % 100 == 0:
+            print(f"step {step} | loss {loss.numpy():.4f}")
+
+
+# old
+# style_transfer_model.fit(
+#     # [x_train, style_train],   # the content and style are different now
+#     [x_train, x_train],
+#     x_train,
+#     epochs=3,
+#     batch_size=16
+# )
 
 """Prediction"""
+
 n = 10
 content_images = x_test[:n]
 style_images = kth_style_images[:n]
